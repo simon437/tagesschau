@@ -1,6 +1,6 @@
-#Tagesschau Downloader
+## Tagesschau Downloader
 
-This open source project provides a simple way to download and play the latest
+This open source tool provides a simple way to download and play the latest
 Tagesschau broadcast on your local media player, via a command-line interface
 (CLI). 
 

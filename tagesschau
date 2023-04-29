@@ -1,0 +1,337 @@
+#!/bin/bash
+
+# author: Simon Olfs
+# lisence: AGPLv3
+# change-log: 26.04.2023 Simon Olfs: Version 0.1 created
+
+# Initial option values
+opt_h=0                             # -h help
+opt_v=0                             # -v version
+opt_l=0                             # -l list
+opt_l_val='.'                       # (default) value for -l argument
+opt_c=0                             # -c clear
+opt_s=0                             # -s show
+opt_s_val=''                        # (default) value for -s argument
+data=''                             # hold data of the tagesschau api
+
+# Some more global variables
+set -o nounset                      # bash: abort on undefined variables
+VERSION="0.1"                       # current version of the script
+PROGNAME=${0##*/}                   # same as PROGNAME=$(basename "$0")
+root="/var/lib/$PROGNAME"           # root for of the programm
+PATH_MEDIA="$root"                  # path to the stored media files
+WARN_MEDIA_SIZE=5242880             # Display warning when size of media files 
+                                    # is more than this value in kilobytes 
+                                    # current warn limit is 5GB
+
+# Exit Codes
+EXIT_OK=0
+EXIT_USAGE=64                       # analogously to EX_USAGE in /usr/include/sysexits.h
+EXIT_INTERNAL_ERROR=70              # EX_INTERNAL_ERROR in sysexits.h
+EXIT_GENERAL_ERROR=80               # nothing similar in sysexits.h
+
+# Output version and help.
+usage() {
+
+cat <<-EOF
+Usage: $PROGNAME [OPTIONS]
+Download and play the tagesschau 8 pm
+
+Options:
+   -h                            Print this help
+   -v                            Print version number
+   -l                            Show a list all local saved media files
+   -s <yyyy-mm-dd>               Play media from certain date
+   -c                            Delete all local stored media files
+   
+   init                          Create all necessary directories and make 
+                                 $PROGNAME executable
+   del                           Delete $PROGNAME from this machine
+
+Examples:
+    $PROGNAME init              Initialize the program
+    $PROGNAME                   Search for the most recent media and play it. 
+                                 If the current time is prior to 8pm, play the 
+                                 content from the preceding day.
+    $PROGNAME -s 2023-04-21     Play the media of the date 01.04.2023
+EOF
+
+}
+
+# Print version information.
+version() {
+    echo "$PROGNAME $VERSION"
+}
+
+# Handles events and logs them
+# Sample:
+#   event_handler INFO "This is an example of a INFO event"
+#   event_handler WARNING $LINENO "This is a sample of a WARNING event"
+#   event_handler ERROR $LINENO "This is a sample of a ERROR event" $EXIT_GENERAL_ERROR
+#   event_handler USAGE $LINENO "This is a sample of a USAGE event"
+# $1 Line, $2 Type, $3 Message, $4 Error Code
+event_handler() {                           
+    TYPE="$1"                       # Type of event: INFO, WARNING, ERROR
+    LINE="$2"                       # Line where the event occured
+    MSG="$3"                        # The message of the event
+    ERROR_CODE=""                   # The errorcode to exit with
+    if [ $# -eq 4 ]; then
+        ERROR_CODE="$4"
+    fi
+
+    case $TYPE in 
+        INFO) write_log_entry info "$MSG" ;;
+        WARNING)            # Print warning to stderr, but do not abort.
+            echo -e >&2 "\x1b[43m\x1b[30m Warning \x1b[0m $MSG"
+            write_log_entry warning "$MSG" ;;
+        ERROR)              # Print error message and abort with error code.
+            echo -e >&2 "\x1b[41m\x1b[30m Error \x1b[0m $MSG"
+            write_log_entry err "Line: $LINE, Code: $ERROR_CODE Msg: $MSG"
+            exit $ERROR_CODE ;;
+        USAGE)              # Print help info and log error
+            echo >&2 "Use option -h for help."
+            event_handler ERROR $LINE "$MSG" $EXIT_USAGE ;;
+        *) ;;
+    esac
+} 
+
+# Write an log entry to journal log
+# $1 Type of entry, $2 Message to write
+write_log_entry() {
+    logger -p $1 "${PROGNAME}[$1]: $2"                                                                                                                                                                                                        
+}
+
+# Play the media of the passed date
+# @param date yyyy-mm-dd
+request_media() {
+    # the date of the news to search for
+    search_date=$1
+
+    # check if the media is local available and play's it
+    status_local=$(is_local_available $search_date)
+    if [ $status_local == 0 ]; then
+        exit $EXIT_OK 
+    fi
+
+    # check if the media is available online download and play it
+    status_online=$(is_online_available $search_date)
+    if [ $status_online == 0 ]; then
+        exit $EXIT_OK 
+    fi
+
+    event_handler ERROR $LINENO "Media $search_date 20:00 is not available" $EXIT_GENERAL_ERROR
+}
+
+# Check if the stored media files combined size is more than MAX_SIZE and display
+# a warning if that is the case.
+check_media_storage() {
+    dir_size=$(du -s $PATH_MEDIA | cut -f1)
+    if [ $dir_size -gt $WARN_MEDIA_SIZE ]; then 
+        event_handler WARNING $LINENO "Media storage size: $(echo "scale=2; $dir_size/1000000" | bc -l)GB"
+    fi 
+}
+
+# Determine the date being sought. If the current time is before 8 PM the 
+# search date is the day befor today. Otherwise the current day
+# @return The search date
+get_search_date() {
+    time_current=$(date -d "$(date +%H:%M) 01/01/1970" +%s)
+    time_20Uhr=68400
+    search_date=$(date +%Y-%m-%d)
+    if [ $time_current -lt $time_20Uhr ]; then
+        search_date=`date -d "-1 day" +%Y-%m-%d`
+    fi
+    echo $search_date
+}
+
+# Checks if the media is online available, downloads it and play's it
+# @param: $1 date (yyyy-mm-dd)
+# @return: 0 if not available
+is_online_available() {
+    content=$(get_online_content)
+    for (( i=0; i < $(echo $content | jq '. | length'); i++ ))
+    do
+        date_online=`echo $content | jq -r ".[$i].date"`
+        if [ "$date_online" == "$1" ]; then
+            video_url=`echo $content | jq -r ".[$i].video_url"`
+            video_output_path=`echo $content | jq -r ".[$i].video_output_path"`
+            check_media_storage
+            wget -q --show-progress $video_url --output-document "$video_output_path" ||
+                event_handler ERROR $LINENO "Download failed for: $video_url" $EXIT_GENERAL_ERROR
+    
+            xdg-open $video_output_path
+            echo 0
+            exit $EXIT_OK
+        fi
+    done
+    echo 1
+}
+
+# Checks if the media is local available and start
+# @param: $1 date (yyyy-mm-dd)
+# @return: 0 if not available
+is_local_available() {
+    # Check if media is locally available
+    video_local=`find $PATH_MEDIA -type f -name "*$1*"`
+    if [ "$video_local" != "" ]; then                                                                                                                                                                                                                  
+        xdg-open $video_local
+        echo 0
+        exit $EXIT_OK
+    fi   
+    echo 1
+}
+
+# Check what is online available through the api2u and refine the result as json
+# Return: videos All online available 20:00 Uhr media as json file in the from
+# {
+#   "date": "yyyy-mm-dd",
+#   "time": "hh:mm",
+#   "timezone": "+hh:mm",
+#   "video_url": "url",
+#   "video_output_path": "./media/tagesschau_20Uhr.yyyy-mm-dd.mp4"
+# }
+get_online_content() {
+    data=`curl -s --location 'https://www.tagesschau.de/api2u/search?searchText=tagesschau%2020%3A00%20Uhr' \
+        --header 'Accept: application/json'` || 
+        event_handler ERROR "api search https://www.tagesschau.de/api2u/search?searchText=tagesschau%2020%3A00%20Uhr failed" $EXIT_GENERAL_ERROR
+
+    results_length=`echo $data | jq '.searchResults | length'`
+    results="[]"
+
+    for (( i=0, c=0; i < $results_length; i++ ))
+    do
+        date_input=`echo $data | jq -r ".searchResults[$i].date"`
+        time=$(date -d"${date_input:11:12}" +"%H:%M")
+        if [ "$time" == "20:00" ]; then
+            date=$(date -d"${date_input:0:10}" +"%Y-%m-%d")
+            timezone="${date_input:23:6}"
+            video_url=`echo $data | jq -r ".searchResults[$i].streams.h264xl"`
+            video_output_path="$PATH_MEDIA/tagesschau_20pm.${date}.mp4"
+
+            results=$(echo $results | jq ".[$c].date = \"$date\"")
+            results=$(echo $results | jq ".[$c].time = \"$time\"")
+            results=$(echo $results | jq ".[$c].timezone = \"$timezone\"")
+            results=$(echo $results | jq ".[$c].video_url = \"$video_url\"")
+            results=$(echo $results | jq ".[$c].video_output_path = \"$video_output_path\"")
+            c=$((c+1)) 
+        fi
+    done
+    echo $results
+}
+
+# shows all local stored media files as a table in the format: date time name path
+list_local_media() {
+    dir_size=$(du -s $PATH_MEDIA | cut -f1)
+    total=$(echo "scale=2; $dir_size/1000000" | bc -l)
+    if [ $dir_size -gt 10 ]; then 
+        echo "total ${total}GB"
+        for file in $PATH_MEDIA/*; do
+            date=$(echo $file | grep -E -o '[0-9]{4}-[0-1]{1}[0-9]{1}-[0-3]{1}[0-9]{1}')
+            printf "%-15s%-15s\n" "$date" "$file"
+        done
+    fi
+}
+
+# simple initialization to use the script
+init() {
+    sudo mkdir -p $PATH_MEDIA 2>/dev/null
+    sudo chmod 777 $PATH_MEDIA
+    sudo cp ./$PROGNAME /usr/local/bin
+}
+
+# delete this script and all media files
+del() {
+    script=$(find /usr/local/bin/ -name $PROGNAME)
+    lib=$(find /var/lib/ -name $PROGNAME 2>/dev/null)
+    if [ $script != "" ]; then
+        sudo rm -rf $script
+    fi
+    if [ $lib != "" ]; then
+        sudo rm -rf $lib
+    fi
+}
+
+# checks and handles the passed arguments
+validate_arguments() {
+    if [ $# -gt 1 ]; then
+        event_handler USAGE $LINENO "Invalid arguments: $@"
+    fi
+
+    argument=$1                     # argument to handle
+    if [ $argument == "init" ]; then
+        init 
+        exit $EXIT_OK
+    fi
+
+    if [ $argument == "del" ]; then
+        del
+        exit $EXIT_OK
+    fi
+
+    event_handler USAGE $LINENO "Invalid argument: $argument"
+}
+
+validate_options_or_exit() {
+    local opt opt_count=0
+    while getopts :hvlcs: opt
+    do
+        (( opt_count++ ))
+        case $opt in
+            h) opt_h=1; (( opt_count-- )) ;;
+            v) opt_v=1; (( opt_count-- )) ;;
+            l) opt_l=1; (( opt_count-- )) ;;
+            c) opt_c=1; (( opt_count-- )) ;;
+            s) opt_s=1; opt_s_val=$OPTARG ;; 
+            :) event_handler USAGE $LINENO "Missing argument for option '-$OPTARG'" ;;
+           \?) event_handler USAGE $LINENO "Invalid option $OPTARG" ;;
+            *) event_handler ERROR $LINENO "Internal error, Line: $(LINENO)" $EXIT_INTERNAL_ERROR ;;
+        esac
+    done
+}
+
+main() {
+    validate_options_or_exit "$@"
+    shift $((OPTIND - 1))
+
+    # -h execution
+    if [ $opt_h -eq 1 ]; then 
+        usage || exit $EXIT_GENERAL_ERROR
+        exit $EXIT_OK
+    fi
+    
+    # -v execution
+    if [ $opt_v -eq 1 ]; then 
+        version || exit $EXIT_GENERAL_ERROR
+        exit $EXIT_OK
+    fi
+
+    # -l execution
+    if [ $opt_l -eq 1 ]; then
+        list_local_media || exit $EXIT_GENERAL_ERROR
+        exit $EXIT_OK
+    fi
+    
+    # -c execution
+    if [ $opt_c -eq 1 ]; then
+        rm -rf ${PATH_MEDIA}/* || 
+            event_handler ERROR $LINENO "Deleting content from $PATH_MEDIA failed" $EXIT_GENERAL_ERROR
+        event_handler INFO $LINENO "Local media storage cleared"
+        exit $EXIT_OK
+    fi
+
+    # -s execution
+    if [ $opt_s -eq 1 ]; then
+        request_media $opt_s_val
+    fi
+
+    # handle arguments
+    if [ $# -gt 0 ]; then
+        validate_arguments "$@"
+        exit $EXIT_OK
+    fi
+
+    # request latest media
+    request_media $(get_search_date)
+}
+
+main "$@"

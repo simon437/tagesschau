@@ -19,10 +19,11 @@ set -o nounset                      # bash: abort on undefined variables
 VERSION="0.1"                       # current version of the script
 PROGNAME=${0##*/}                   # same as PROGNAME=$(basename "$0")
 root="/var/lib/$PROGNAME"           # root for of the programm
-PATH_MEDIA="$root"                  # path to the stored media files
+PATH_MEDIA="$root/media"            # path to the stored media files
 WARN_MEDIA_SIZE=5242880             # Display warning when size of media files 
                                     # is more than this value in kilobytes 
                                     # current warn limit is 5GB
+LOGO="$root/logo.svg"               # path to the logo of the tagesschau
 
 # Exit Codes
 EXIT_OK=0
@@ -80,7 +81,8 @@ event_handler() {
     fi
 
     case $TYPE in 
-        INFO) write_log_entry info "$MSG" ;;
+        INFO) write_log_entry info "$MSG"
+              notify-send --urgency=low -i $PROGNAME -i $LOGO "$MSG" ;;
         WARNING)            # Print warning to stderr, but do not abort.
             echo -e >&2 "\x1b[43m\x1b[30m Warning \x1b[0m $MSG"
             write_log_entry warning "$MSG" ;;
@@ -156,9 +158,9 @@ is_online_available() {
             video_url=`echo $content | jq -r ".[$i].video_url"`
             video_output_path=`echo $content | jq -r ".[$i].video_output_path"`
             check_media_storage
+            event_handler INFO $LINENO "Downloading: Tagesschau $(get_search_date)"
             wget -q --show-progress $video_url --output-document "$video_output_path" ||
                 event_handler ERROR $LINENO "Download failed for: $video_url" $EXIT_GENERAL_ERROR
-    
             xdg-open $video_output_path
             echo 0
             exit $EXIT_OK
@@ -237,6 +239,7 @@ init() {
     sudo mkdir -p $PATH_MEDIA 2>/dev/null
     sudo chmod 777 $PATH_MEDIA
     sudo cp ./$PROGNAME /usr/local/bin
+    sudo cp ./logo.svg $root
 }
 
 # delete this script and all media files

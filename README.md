@@ -1,6 +1,6 @@
 ## Tagesschau Downloader
 
-This open source tool provides a simple way to download and play the latest
+This tool provides a simple way to download and play the latest
 Tagesschau broadcast on your local media player, via a command-line interface
 (CLI). 
 
@@ -18,7 +18,7 @@ dependencies.
 Once Tagesschau Downloader is installed, you can easily download the latest
 broadcast by running the following command:
 
-`$ ./tagesschau`
+`$ tagesschau`
 
 This command will automatically retrieve the latest Tagesschau broadcast via
 the official Tagesschau API, which is located at

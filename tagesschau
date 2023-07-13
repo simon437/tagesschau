@@ -236,6 +236,9 @@ list_local_media() {
 
 # simple initialization to use the script
 init() {
+    input="./requirements.txt"
+    yay -S --noconfirm --needed - < $input
+    
     sudo mkdir -p $PATH_MEDIA 2>/dev/null
     sudo chmod 777 $PATH_MEDIA
     sudo cp ./$PROGNAME /usr/local/bin
